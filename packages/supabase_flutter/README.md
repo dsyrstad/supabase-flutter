@@ -73,112 +73,100 @@ supabase.auth.onAuthStateChange.listen((data) {
 
 #### Native Apple Sign in
 
-You need to [register your app ID with Apple](https://developer.apple.com/help/account/manage-identifiers/register-an-app-id/) with the `Sign In with Apple` capability selected, and add the bundle ID to your Supabase dashboard in `Authentication -> Providers -> Apple` before performing native Apple sign in.
+You can perform Apple sign in using the [sign_in_with_apple](https://pub.dev/packages/sign_in_with_apple) package on Flutter.
+Follow the instructions on README of the `sign_in_with_apple` package to setup the native Apple sign in on iOS and macOS.
+
+Once the setup is complete on the Flutter app, add the bundle ID of your app to your Supabase dashboard in `Authentication -> Providers -> Apple` in order to register your app with Supabase.
 
 ```dart
-// Perform Apple login on iOS and macOS
-await supabase.auth.signInWithApple();
-```
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-`signInWithApple()` is only supported on iOS and on macOS. Use the `signInWithOAuth()` method to perform web-based Apple sign in on other platforms.
+/// Performs Apple sign in on iOS or macOS
+Future<AuthResponse> signInWithApple() async {
+  final rawNonce = supabase.auth.generateRawNonce();
+  final hashedNonce = sha256.convert(utf8.encode(rawNonce)).toString();
+
+  final credential = await SignInWithApple.getAppleIDCredential(
+    scopes: [
+      AppleIDAuthorizationScopes.email,
+      AppleIDAuthorizationScopes.fullName,
+    ],
+    nonce: hashedNonce,
+  );
+
+  final idToken = credential.identityToken;
+  if (idToken == null) {
+    throw const AuthException(
+        'Could not find ID Token from generated credential.');
+  }
+
+  return signInWithIdToken(
+    provider: OAuthProvider.apple,
+    idToken: idToken,
+    nonce: rawNonce,
+  );
+}
+```
 
 #### Native Google sign in
 
-You can perform native Google sign in on Android and iOS using [flutter_appauth](https://pub.dev/packages/flutter_appauth).
+You can perform native Google sign in on Android and iOS using [google_sign_in](https://pub.dev/packages/google_sign_in).
+For platform specific settings, follow the instructions on README of the package.
 
-First, you need to create a client ID in your Google Cloud console and add them to your Supabase dashboard in `Authentication -> Providers -> Google -> Authorized Client IDs`. You can add multiple client IDs as comma separated string.
+First, create client IDs for your app. You need to create a web client ID as well to perform Google sign-in with Supabase.
 
+- [Steps to obtain web client ID](https://developers.google.com/identity/sign-in/android/start-integrating#configure_a_project)
 - [Steps to obtain Android client ID](https://developers.google.com/identity/sign-in/android/start-integrating#configure_a_project)
 - [Steps to obtain iOS client ID](https://developers.google.com/identity/sign-in/ios/start-integrating#get_an_oauth_client_id)
 
-Second, add [flutter_appauth](https://pub.dev/packages/flutter_appauth) to your app and complete the [setup steps](https://pub.dev/packages/flutter_appauth#android-setup). For `appAuthRedirectScheme`, reverse DNS form of the client ID should be set (e.g. `com.googleusercontent.apps.*account_id*`). You also need [crypto](https://pub.dev/packages/crypto) package to hash nonce.
+Once you have registered your app and created the client IDs, add the web client ID in your Supabase dashboard in `Authentication -> Providers -> Google`. Also turn on the `Skip nonce check` option, which will enable Google sign-in on iOS.
 
-```bash
-flutter pub add flutter_appauth crypto
-```
-
-At this point you can perform native Google sign in using the following code. Make sure to replace the `clientId` and `applicationId` with your own.
+At this point you can perform native Google sign in using the following code. Be sure to replace the `webClientId` and `iosClientId` with your own.
 
 ```dart
-import 'dart:convert';
-import 'dart:math';
-import 'package:crypto/crypto.dart';
-import 'package:flutter_appauth/flutter_appauth.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-/// Function to generate a random 16 character string.
-String _generateRandomString() {
-  final random = Random.secure();
-  return base64Url.encode(List<int>.generate(16, (_) => random.nextInt(256)));
-}
+...
 
-Future<AuthResponse> signInWithGoogle() {
-  // Just a random string
-  final rawNonce = _generateRandomString();
-  final hashedNonce =
-      sha256.convert(utf8.encode(rawNonce)).toString();
-
-  /// TODO: update the client ID with your own
+Future<AuthResponse> _googleSignIn() async {
+  /// TODO: update the Web client ID with your own.
   ///
-  /// Client ID that you registered with Google Cloud.
-  /// You will have two different values for iOS and Android.
-  const clientId = 'YOUR_CLIENT_ID_HERE';
+  /// Web Client ID that you registered with Google Cloud.
+  const webClientId = 'my-web.apps.googleusercontent.com';
 
-  /// reverse DNS form of the client ID + `:/` is set as the redirect URL
-  final redirectUrl = '${clientId.split('.').reversed.join('.')}:/';
+  /// TODO: update the iOS client ID with your own.
+  ///
+  /// iOS Client ID that you registered with Google Cloud.
+  const iosClientId = 'my-ios.apps.googleusercontent.com';
 
-  /// Fixed value for google login
-  const discoveryUrl =
-      'https://accounts.google.com/.well-known/openid-configuration';
+  // Google sign in on Android will work without providing the Android
+  // Client ID registered on Google Cloud.
 
-  final appAuth = FlutterAppAuth();
-
-  // authorize the user by opening the concent page
-  final result = await appAuth.authorize(
-    AuthorizationRequest(
-      clientId,
-      redirectUrl,
-      discoveryUrl: discoveryUrl,
-      nonce: hashedNonce,
-      scopes: [
-        'openid',
-        'email',
-      ],
-    ),
+  final GoogleSignIn googleSignIn = GoogleSignIn(
+    clientId: iosClientId,
+    serverClientId: webClientId,
   );
+  final googleUser = await googleSignIn.signIn();
+  final googleAuth = await googleUser!.authentication;
+  final accessToken = googleAuth.accessToken;
+  final idToken = googleAuth.idToken;
 
-  if (result == null) {
-    throw 'No result';
+  if (accessToken == null) {
+    throw 'No Access Token found.';
   }
-
-  // Request the access and id token to google
-  final tokenResult = await appAuth.token(
-    TokenRequest(
-      clientId,
-      redirectUrl,
-      authorizationCode: result.authorizationCode,
-      discoveryUrl: discoveryUrl,
-      codeVerifier: result.codeVerifier,
-      nonce: result.nonce,
-      scopes: [
-        'openid',
-        'email',
-      ],
-    ),
-  );
-
-  final idToken = tokenResult?.idToken;
-
   if (idToken == null) {
-    throw 'No idToken';
+    throw 'No ID Token found.';
   }
 
   return supabase.auth.signInWithIdToken(
     provider: Provider.google,
     idToken: idToken,
-    nonce: rawNonce,
+    accessToken: accessToken,
   );
 }
+...
 ```
 
 ### OAuth login
@@ -190,7 +178,7 @@ Use the `redirectTo` parameter to redirect the user to a deep link to bring the 
 ```dart
 // Perform web based OAuth login
 await supabase.auth.signInWithOAuth(
-  Provider.github,
+  OAuthProvider.github,
   redirectTo: kIsWeb ? null : 'io.supabase.flutter://callback',
 );
 
@@ -240,12 +228,12 @@ class MyWidget extends StatefulWidget {
 
 class _MyWidgetState extends State<MyWidget> {
   // Persisting the future as local variable to prevent refetching upon rebuilds.
-  final List<Map<String, dynamic>> _stream = supabase.from('countries').stream(primaryKey: ['id']);
+  final stream = supabase.from('countries').stream(primaryKey: ['id']);
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _stream,
+      stream: stream,
       builder: (context, snapshot) {
         // return your widget with the data from snapshot
       },
@@ -261,33 +249,36 @@ You can get notified whenever there is a change in your Supabase tables.
 ```dart
 final myChannel = supabase.channel('my_channel');
 
-myChannel.on(
-    RealtimeListenTypes.postgresChanges,
-    ChannelFilter(
-      event: '*',
+myChannel
+    .onPostgresChanges(
+      event: PostgresChangeEvent.all,
       schema: 'public',
       table: 'countries',
-    ), (payload, [ref]) {
-  // Do something fun or interesting when there is an change on the database
-}).subscribe();
+      callback: (payload) {
+        // Do something fun or interesting when there is an change on the database
+      },
+    )
+    .subscribe();
 ```
 
 #### [Broadcast](https://supabase.com/docs/guides/realtime#broadcast)
 
-Broadcast lets you send and receive low latency messages between connected clients without bypassing the database.
+Broadcast lets you send and receive low latency messages between connected clients by bypassing the database.
 
 ```dart
 final myChannel = supabase.channel('my_channel');
 
 // Subscribe to `cursor-pos` broadcast event
-myChannel.on(RealtimeListenTypes.broadcast,
-    ChannelFilter(event: 'cursor-pos'), (payload, [ref]) {
-  // Do something fun or interesting when there is an change on the database
-}).subscribe();
+final myChannel = supabase.channel('my_channel');
+
+myChannel
+    .onBroadcast(event: 'cursor-pos', callback: (payload) {}
+        // Do something fun or interesting when there is an change on the database
+        )
+    .subscribe();
 
 // Send a broadcast message to other connected clients
-await myChannel.send(
-  type: RealtimeListenTypes.broadcast,
+await myChannel.sendBroadcastMessage(
   event: 'cursor-pos',
   payload: {'x': 30, 'y': 50},
 );
@@ -301,19 +292,25 @@ Presence let's you easily create "I'm online" feature.
 final myChannel = supabase.channel('my_channel');
 
 // Subscribe to presence events
-myChannel.on(
-    RealtimeListenTypes.presence, ChannelFilter(event: 'sync'),
-    (payload, [ref]) {
-  final onlineUsers = myChannel.presenceState();
-  // handle sync event
-}).on(RealtimeListenTypes.presence, ChannelFilter(event: 'join'),
-    (payload, [ref]) {
-  // New users have joined
-}).on(RealtimeListenTypes.presence, ChannelFilter(event: 'leave'),
-    (payload, [ref]) {
-  // Users have left
-}).subscribe(((status, [_]) async {
-  if (status == 'SUBSCRIBED') {
+myChannel
+    .onPresence(
+        event: PresenceEvent.sync,
+        callback: (payload) {
+          final onlineUsers = myChannel.presenceState();
+          // handle sync event
+        })
+    .onPresence(
+        event: PresenceEvent.join,
+        callback: (payload) {
+          // New users have joined
+        })
+    .onPresence(
+        event: PresenceEvent.leave,
+        callback: (payload) {
+          // Users have left
+        })
+    .subscribe(((status, [_]) async {
+  if (status == RealtimeSubscribeStatus.subscribed) {
     // Send the current user's state upon subscribing
     final status = await myChannel
         .track({'online_at': DateTime.now().toIso8601String()});
@@ -556,45 +553,46 @@ Add this XML chapter in your macos/Runner/Info.plist inside <plist version="1.0"
 
 ### Custom LocalStorage
 
-As default, `supabase_flutter` uses [`hive`](https://pub.dev/packages/hive) to persist the user session. Encryption is disabled by default, since an unique encryption key is necessary, and we can not define it. To set an `encryptionKey`, do the following:
+As default, `supabase_flutter` uses [`Shared preferences`](https://pub.dev/packages/shared_preferences) to persist the user session.
 
-```dart
-Future<void> main() async {
-  // set it before initializing
-  HiveLocalStorage.encryptionKey = 'my_secure_key';
-  await Supabase.initialize(...);
-}
-```
-
-**Note** the key must be the same. There is no check if the encryption key is correct. If it isn't, there may be unexpected behavior. [Learn more](https://docs.hivedb.dev/#/advanced/encrypted_box) about encryption in hive.
-
-However you can use any other methods by creating a `LocalStorage` implementation. For example, we can use [`flutter_secure_storage`](https://pub.dev/packages/flutter_secure_storage) plugin to store the user session in a secure storage.
+However, you can use any other methods by creating a `LocalStorage` implementation. For example, we can use [`flutter_secure_storage`](https://pub.dev/packages/flutter_secure_storage) plugin to store the user session in a secure storage.
 
 ```dart
 // Define the custom LocalStorage implementation
-class SecureLocalStorage extends LocalStorage {
-  SecureLocalStorage() : super(
-    initialize: () async {},
-    hasAccessToken: () {
-      const storage = FlutterSecureStorage();
-      return storage.containsKey(key: supabasePersistSessionKey);
-    }, accessToken: () {
-      const storage = FlutterSecureStorage();
-      return storage.read(key: supabasePersistSessionKey);
-    }, removePersistedSession: () {
-      const storage = FlutterSecureStorage();
-      return storage.delete(key: supabasePersistSessionKey);
-    }, persistSession: (String value) {
-      const storage = FlutterSecureStorage();
-      return storage.write(key: supabasePersistSessionKey, value: value);
-    },
-  );
+class MockLocalStorage extends LocalStorage {
+
+  final storage = FlutterSecureStorage();
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<String?> accessToken() async {
+    return storage.containsKey(key: supabasePersistSessionKey);
+  }
+
+  @override
+  Future<bool> hasAccessToken() async {
+    return storage.read(key: supabasePersistSessionKey);
+  }
+
+  @override
+  Future<void> persistSession(String persistSessionString) async {
+    return storage.write(key: supabasePersistSessionKey, value: persistSessionString);
+  }
+
+  @override
+  Future<void> removePersistedSession() async {
+    return storage.delete(key: supabasePersistSessionKey);
+  }
 }
 
 // use it when initializing
 Supabase.initialize(
   ...
-  localStorage: SecureLocalStorage(),
+  authOptions: FlutterAuthClientOptions(
+    localStorage: const EmptyLocalStorage(),
+  ),
 );
 ```
 
@@ -603,7 +601,9 @@ You can also use `EmptyLocalStorage` to disable session persistence:
 ```dart
 Supabase.initialize(
   // ...
-  localStorage: const EmptyLocalStorage(),
+  authOptions: FlutterAuthClientOptions(
+    localStorage: const EmptyLocalStorage(),
+  ),
 );
 ```
 

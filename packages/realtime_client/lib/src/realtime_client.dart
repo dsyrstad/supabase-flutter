@@ -3,10 +3,11 @@ import 'dart:convert';
 import 'dart:core';
 
 import 'package:collection/collection.dart';
+import 'package:http/http.dart';
 import 'package:meta/meta.dart';
+import 'package:realtime_client/realtime_client.dart';
 import 'package:realtime_client/src/constants.dart';
 import 'package:realtime_client/src/message.dart';
-import 'package:realtime_client/src/realtime_channel.dart';
 import 'package:realtime_client/src/retry_timer.dart';
 import 'package:realtime_client/src/websocket/websocket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -26,6 +27,26 @@ typedef RealtimeDecode = void Function(
   void Function(dynamic result) callback,
 );
 
+/// Event details for when the connection closed.
+class RealtimeCloseEvent {
+  /// Web socket protocol status codes for when a connection is closed.
+  ///
+  /// The full list can be found at the following:
+  ///
+  /// https://datatracker.ietf.org/doc/html/rfc6455#section-7.4
+  final int code;
+
+  /// Connection closed reason sent from the server
+  ///
+  /// https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.6
+  final String? reason;
+
+  const RealtimeCloseEvent({
+    required this.code,
+    required this.reason,
+  });
+}
+
 class RealtimeClient {
   String? accessToken;
   List<RealtimeChannel> channels = [];
@@ -34,6 +55,7 @@ class RealtimeClient {
   final Map<String, dynamic> params;
   final Duration timeout;
   final WebSocketTransport transport;
+  final Client? httpClient;
   int heartbeatIntervalMs = 30000;
   Timer? heartbeatTimer;
 
@@ -87,7 +109,14 @@ class RealtimeClient {
     Map<String, String>? headers,
     this.params = const {},
     this.longpollerTimeout = 20000,
-  })  : endPoint = '$endPoint/${Transports.websocket}',
+    RealtimeLogLevel? logLevel,
+    this.httpClient,
+  })  : endPoint = Uri.parse('$endPoint/${Transports.websocket}')
+            .replace(
+              queryParameters:
+                  logLevel == null ? null : {'log_level': logLevel.name},
+            )
+            .toString(),
         headers = {
           ...Constants.defaultHeaders,
           if (headers != null) ...headers,
@@ -98,7 +127,8 @@ class RealtimeClient {
       eventsPerSecondLimitMs = (1000 / int.parse(eventsPerSecond)).floor();
     }
 
-    accessToken = this.headers['Authorization']?.split(' ').last;
+    final customJWT = this.headers['Authorization']?.split(' ').last;
+    accessToken = customJWT ?? params['apikey'];
 
     this.reconnectAfterMs =
         reconnectAfterMs ?? RetryTimer.createRetryFunction();
@@ -249,10 +279,6 @@ class RealtimeClient {
     String topic, [
     RealtimeChannelConfig params = const RealtimeChannelConfig(),
   ]) {
-    if (!isConnected) {
-      connect();
-    }
-
     final chan = RealtimeChannel('realtime:$topic', this, params: params);
     channels.add(chan);
     return chan;
@@ -380,13 +406,17 @@ class RealtimeClient {
 
   /// communication has been closed
   void _onConnClose() {
-    final event = conn?.closeReason ?? '';
+    final statusCode = conn?.closeCode;
+    RealtimeCloseEvent? event;
+    if (statusCode != null) {
+      event = RealtimeCloseEvent(code: statusCode, reason: conn?.closeReason);
+    }
     log('transport', 'close', event);
 
     /// SocketStates.disconnected: by user with socket.disconnect()
     /// SocketStates.closed: NOT by user, should try to reconnect
     if (connState == SocketStates.closed) {
-      _triggerChanError(event);
+      _triggerChanError();
       reconnectTimer.scheduleTimeout();
     }
     if (heartbeatTimer != null) heartbeatTimer!.cancel();
@@ -397,15 +427,15 @@ class RealtimeClient {
 
   void _onConnError(dynamic error) {
     log('transport', error.toString());
-    _triggerChanError(error);
+    _triggerChanError();
     for (final callback in stateChangeCallbacks['error']!) {
       callback(error);
     }
   }
 
-  void _triggerChanError([dynamic error]) {
+  void _triggerChanError() {
     for (final channel in channels) {
-      channel.trigger(ChannelEvents.error.eventName(), error);
+      channel.trigger(ChannelEvents.error.eventName());
     }
   }
 
@@ -415,9 +445,10 @@ class RealtimeClient {
     }
 
     var endpoint = Uri.parse(url);
-    final searchParams = Map<String, dynamic>.from(endpoint.queryParameters);
-    params.forEach((k, v) => searchParams[k] = v);
-    endpoint = endpoint.replace(queryParameters: searchParams);
+    endpoint = endpoint.replace(queryParameters: {
+      ...endpoint.queryParameters,
+      ...params,
+    });
 
     return endpoint.toString();
   }

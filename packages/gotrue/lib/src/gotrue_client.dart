@@ -13,7 +13,6 @@ import 'package:http/http.dart';
 import 'package:jwt_decode/jwt_decode.dart';
 import 'package:meta/meta.dart';
 import 'package:rxdart/subjects.dart';
-import 'package:universal_io/io.dart';
 
 part 'gotrue_mfa_api.dart';
 
@@ -28,8 +27,8 @@ part 'gotrue_mfa_api.dart';
 ///
 /// [asyncStorage] local storage to store pkce code verifiers. Required when using the pkce flow.
 ///
-/// Set [flowType] to `AuthFlowType.pkce` to perform pkce auth flow.
-/// /// {@endtemplate}
+/// Set [flowType] to [AuthFlowType.implicit] to perform old implicit auth flow.
+/// {@endtemplate}
 class GoTrueClient {
   /// Namespace for the GoTrue API methods.
   /// These can be used for example to get a user from a JWT in a server environment or reset a user's password.
@@ -93,7 +92,7 @@ class GoTrueClient {
     bool? autoRefreshToken,
     Client? httpClient,
     GotrueAsyncStorage? asyncStorage,
-    AuthFlowType flowType = AuthFlowType.implicit,
+    AuthFlowType flowType = AuthFlowType.pkce,
   })  : _url = url ?? Constants.defaultGotrueUrl,
         _headers = headers ?? {},
         _httpClient = httpClient,
@@ -141,6 +140,8 @@ class GoTrueClient {
   /// [password] is the password of the user
   ///
   /// [data] sets [User.userMetadata] without an extra call to [updateUser]
+  ///
+  /// [channel] Messaging channel to use (e.g. whatsapp or sms)
   Future<AuthResponse> signUp({
     String? email,
     String? phone,
@@ -148,6 +149,7 @@ class GoTrueClient {
     String? emailRedirectTo,
     Map<String, dynamic>? data,
     String? captchaToken,
+    OtpChannel channel = OtpChannel.sms,
   }) async {
     assert((email != null && phone == null) || (email == null && phone != null),
         'You must provide either an email or phone number');
@@ -191,6 +193,7 @@ class GoTrueClient {
         'password': password,
         'data': data,
         'gotrue_meta_security': {'captcha_token': captchaToken},
+        'channel': channel.name,
       };
       final fetchOptions = GotrueRequestOptions(headers: _headers, body: body);
       response = await _fetch.request('$_url/signup', RequestMethodType.post,
@@ -205,7 +208,7 @@ class GoTrueClient {
     final session = authResponse.session;
     if (session != null) {
       _saveSession(session);
-      _notifyAllSubscribers(AuthChangeEvent.signedIn);
+      notifyAllSubscribers(AuthChangeEvent.signedIn);
     }
 
     return authResponse;
@@ -260,14 +263,14 @@ class GoTrueClient {
 
     if (authResponse.session?.accessToken != null) {
       _saveSession(authResponse.session!);
-      _notifyAllSubscribers(AuthChangeEvent.signedIn);
+      notifyAllSubscribers(AuthChangeEvent.signedIn);
     }
     return authResponse;
   }
 
   /// Generates a link to log in an user via a third-party provider.
   Future<OAuthResponse> getOAuthSignInUrl({
-    required Provider provider,
+    required OAuthProvider provider,
     String? redirectTo,
     String? scopes,
     Map<String, String>? queryParams,
@@ -282,12 +285,18 @@ class GoTrueClient {
   }
 
   /// Verifies the PKCE code verifyer and retrieves a session.
-  Future<AuthResponse> exchangeCodeForSession(String authCode) async {
+  Future<AuthSessionUrlResponse> exchangeCodeForSession(String authCode) async {
     assert(_asyncStorage != null,
         'You need to provide asyncStorage to perform pkce flow.');
 
-    final codeVerifier = await _asyncStorage!
+    final codeVerifierRawString = await _asyncStorage!
         .getItem(key: '${Constants.defaultStorageKey}-code-verifier');
+    if (codeVerifierRawString == null) {
+      throw AuthException('Code verifier could not be found in local storage.');
+    }
+    final codeVerifier = codeVerifierRawString.split('/').first;
+    final eventName = codeVerifierRawString.split('/').last;
+    final redirectType = AuthChangeEventExtended.fromString(eventName);
 
     final Map<String, dynamic> response = await _fetch.request(
       '$_url/token',
@@ -307,20 +316,23 @@ class GoTrueClient {
     await _asyncStorage!
         .removeItem(key: '${Constants.defaultStorageKey}-code-verifier');
 
-    final authResponse = AuthResponse.fromJson(response);
+    final authSessionUrlResponse = AuthSessionUrlResponse(
+        session: Session.fromJson(response)!, redirectType: redirectType?.name);
 
-    final session = authResponse.session;
-    if (session != null) {
-      _saveSession(session);
-      _notifyAllSubscribers(AuthChangeEvent.signedIn);
+    final session = authSessionUrlResponse.session;
+    _saveSession(session);
+    if (redirectType == AuthChangeEvent.passwordRecovery) {
+      notifyAllSubscribers(AuthChangeEvent.passwordRecovery);
+    } else {
+      notifyAllSubscribers(AuthChangeEvent.signedIn);
     }
 
-    return authResponse;
+    return authSessionUrlResponse;
   }
 
   /// Allows signing in with an ID token issued by certain supported providers.
   /// The [idToken] is verified for validity and a new session is established.
-  /// This method of signing in only supports [Provider.google] or [Provider.apple].
+  /// This method of signing in only supports [OAuthProvider.google] or [OAuthProvider.apple].
   ///
   /// If the ID token contains an `at_hash` claim, then [accessToken] must be
   /// provided to compare its hash with the value in the ID token.
@@ -334,7 +346,7 @@ class GoTrueClient {
   /// This method is experimental.
   @experimental
   Future<AuthResponse> signInWithIdToken({
-    required Provider provider,
+    required OAuthProvider provider,
     required String idToken,
     String? accessToken,
     String? nonce,
@@ -342,9 +354,9 @@ class GoTrueClient {
   }) async {
     _removeSession();
 
-    if (provider != Provider.google && provider != Provider.apple) {
+    if (provider != OAuthProvider.google && provider != OAuthProvider.apple) {
       throw AuthException('Provider must either be '
-          '${Provider.google.name} or ${Provider.apple.name}.');
+          '${OAuthProvider.google.name} or ${OAuthProvider.apple.name}.');
     }
 
     final response = await _fetch.request(
@@ -372,7 +384,7 @@ class GoTrueClient {
     }
 
     _saveSession(authResponse.session!);
-    _notifyAllSubscribers(AuthChangeEvent.signedIn);
+    notifyAllSubscribers(AuthChangeEvent.signedIn);
 
     return authResponse;
   }
@@ -392,6 +404,8 @@ class GoTrueClient {
   /// [data] can be used to set the user's metadata, which maps to the `auth.users.user_metadata` column.
   ///
   /// [captchaToken] Verification token received when the user completes the captcha on the site.
+  ///
+  /// [channel] Messaging channel to use (e.g. whatsapp or sms)
   Future<void> signInWithOtp({
     String? email,
     String? phone,
@@ -399,6 +413,7 @@ class GoTrueClient {
     bool? shouldCreateUser,
     Map<String, dynamic>? data,
     String? captchaToken,
+    OtpChannel channel = OtpChannel.sms,
   }) async {
     _removeSession();
 
@@ -437,6 +452,7 @@ class GoTrueClient {
         'data': data ?? {},
         'create_user': shouldCreateUser ?? true,
         'gotrue_meta_security': {'captcha_token': captchaToken},
+        'channel': channel.name,
       };
       final fetchOptions = GotrueRequestOptions(headers: _headers, body: body);
 
@@ -493,7 +509,7 @@ class GoTrueClient {
     }
 
     _saveSession(authResponse.session!);
-    _notifyAllSubscribers(AuthChangeEvent.signedIn);
+    notifyAllSubscribers(AuthChangeEvent.signedIn);
 
     return authResponse;
   }
@@ -580,6 +596,23 @@ class GoTrueClient {
     }
   }
 
+  /// Gets the current user details from current session or custom [jwt]
+  Future<UserResponse> getUser([String? jwt]) async {
+    if (jwt == null && currentSession?.accessToken == null) {
+      throw AuthException('Cannot get user: no current session.');
+    }
+    final options = GotrueRequestOptions(
+      headers: _headers,
+      jwt: jwt ?? currentSession?.accessToken,
+    );
+    final response = await _fetch.request(
+      '$_url/user',
+      RequestMethodType.get,
+      options: options,
+    );
+    return UserResponse.fromJson(response);
+  }
+
   /// Updates user data, if there is a logged in user.
   Future<UserResponse> updateUser(
     UserAttributes attributes, {
@@ -603,7 +636,7 @@ class GoTrueClient {
 
     _currentUser = userResponse.user;
     _currentSession = currentSession?.copyWith(user: userResponse.user);
-    _notifyAllSubscribers(AuthChangeEvent.userUpdated);
+    notifyAllSubscribers(AuthChangeEvent.userUpdated);
 
     return userResponse;
   }
@@ -627,19 +660,7 @@ class GoTrueClient {
         throw AuthPKCEGrantCodeExchangeError(
             'No code detected in query parameters.');
       }
-      final data = await exchangeCodeForSession(authCode);
-      final session = data.session;
-      if (session == null) {
-        throw AuthPKCEGrantCodeExchangeError(
-            'No session found for the auth code.');
-      }
-
-      if (storeSession == true) {
-        _saveSession(session);
-        _notifyAllSubscribers(AuthChangeEvent.signedIn);
-      }
-
-      return AuthSessionUrlResponse(session: session, redirectType: null);
+      return await exchangeCodeForSession(authCode);
     }
     var url = originUrl;
     if (originUrl.hasQuery) {
@@ -652,7 +673,7 @@ class GoTrueClient {
 
     final errorDescription = url.queryParameters['error_description'];
     if (errorDescription != null) {
-      throw _notifyException(AuthException(errorDescription));
+      throw AuthException(errorDescription);
     }
 
     final accessToken = url.queryParameters['access_token'];
@@ -663,26 +684,21 @@ class GoTrueClient {
     final providerRefreshToken = url.queryParameters['provider_refresh_token'];
 
     if (accessToken == null) {
-      throw _notifyException(AuthException('No access_token detected.'));
+      throw AuthException('No access_token detected.');
     }
     if (expiresIn == null) {
-      throw _notifyException(AuthException('No expires_in detected.'));
+      throw AuthException('No expires_in detected.');
     }
     if (refreshToken == null) {
-      throw _notifyException(AuthException('No refresh_token detected.'));
+      throw AuthException('No refresh_token detected.');
     }
     if (tokenType == null) {
-      throw _notifyException(AuthException('No token_type detected.'));
+      throw AuthException('No token_type detected.');
     }
 
-    final headers = {..._headers};
-    headers['Authorization'] = 'Bearer $accessToken';
-    final options = GotrueRequestOptions(headers: headers);
-    final response = await _fetch.request('$_url/user', RequestMethodType.get,
-        options: options);
-    final user = UserResponse.fromJson(response).user;
+    final user = (await getUser(accessToken)).user;
     if (user == null) {
-      throw _notifyException(AuthException('No user found.'));
+      throw AuthException('No user found.');
     }
 
     final session = Session(
@@ -700,9 +716,9 @@ class GoTrueClient {
     if (storeSession == true) {
       _saveSession(session);
       if (redirectType == 'recovery') {
-        _notifyAllSubscribers(AuthChangeEvent.passwordRecovery);
+        notifyAllSubscribers(AuthChangeEvent.passwordRecovery);
       } else {
-        _notifyAllSubscribers(AuthChangeEvent.signedIn);
+        notifyAllSubscribers(AuthChangeEvent.signedIn);
       }
     }
 
@@ -711,9 +727,11 @@ class GoTrueClient {
 
   /// Signs out the current user, if there is a logged in user.
   ///
+  /// [scope] dtermines which sessions should be logged out.
+  ///
   /// If using [SignOutScope.others] scope, no [AuthChangeEvent.signedOut] event is fired!
   Future<void> signOut({
-    SignOutScope scope = SignOutScope.global,
+    SignOutScope scope = SignOutScope.local,
   }) async {
     final accessToken = currentSession?.accessToken;
 
@@ -721,7 +739,7 @@ class GoTrueClient {
       _removeSession();
       await _asyncStorage?.removeItem(
           key: '${Constants.defaultStorageKey}-code-verifier');
-      _notifyAllSubscribers(AuthChangeEvent.signedOut);
+      notifyAllSubscribers(AuthChangeEvent.signedOut);
     }
 
     if (accessToken != null) {
@@ -749,8 +767,9 @@ class GoTrueClient {
           'You need to provide asyncStorage to perform pkce flow.');
       final codeVerifier = generatePKCEVerifier();
       await _asyncStorage!.setItem(
-          key: '${Constants.defaultStorageKey}-code-verifier',
-          value: codeVerifier);
+        key: '${Constants.defaultStorageKey}-code-verifier',
+        value: '$codeVerifier/${AuthChangeEvent.passwordRecovery.name}',
+      );
       codeChallenge = generatePKCEChallenge(codeVerifier);
     }
 
@@ -773,43 +792,43 @@ class GoTrueClient {
     );
   }
 
-  /// Recover session from persisted session json string.
-  /// Persisted session json has the format { currentSession, expiresAt }
-  ///
-  /// currentSession: session json object, expiresAt: timestamp in seconds
-  Future<AuthResponse> recoverSession(String jsonStr) async {
-    final persistedData = json.decode(jsonStr) as Map<String, dynamic>;
-    final currentSession =
-        persistedData['currentSession'] as Map<String, dynamic>?;
-    final expiresAt = persistedData['expiresAt'] as int?;
-    if (currentSession == null) {
-      throw _notifyException(AuthException('Missing currentSession.'));
-    }
-    if (expiresAt == null) {
-      throw _notifyException(AuthException('Missing expiresAt.'));
-    }
-
-    final session = Session.fromJson(currentSession);
+  /// Set the initial session to the session obtained from local storage
+  Future<void> setInitialSession(String jsonStr) async {
+    final session = Session.fromJson(json.decode(jsonStr));
     if (session == null) {
-      throw _notifyException(AuthException('Current session is missing data.'));
+      // sign out to delete the local storage from supabase_flutter
+      await signOut();
+      throw notifyException(AuthException('Initial session is missing data.'));
     }
 
-    final timeNow = (DateTime.now().millisecondsSinceEpoch / 1000).round();
-    if (expiresAt < (timeNow + Constants.expiryMargin.inSeconds)) {
+    _currentSession = session;
+    notifyAllSubscribers(AuthChangeEvent.initialSession);
+  }
+
+  /// Recover session from stringified [Session].
+  Future<AuthResponse> recoverSession(String jsonStr) async {
+    final session = Session.fromJson(json.decode(jsonStr));
+    if (session == null) {
+      await signOut();
+      throw notifyException(AuthException('Current session is missing data.'));
+    }
+
+    if (session.isExpired) {
       if (_autoRefreshToken && session.refreshToken != null) {
         return await _callRefreshToken(
           refreshToken: session.refreshToken,
           accessToken: session.accessToken,
         );
       } else {
-        throw _notifyException(AuthException('Session expired.'));
+        await signOut();
+        throw notifyException(AuthException('Session expired.'));
       }
     } else {
       final shouldEmitEvent = _currentSession == null ||
           _currentSession?.user.id != session.user.id;
       _saveSession(session);
 
-      if (shouldEmitEvent) _notifyAllSubscribers(AuthChangeEvent.signedIn);
+      if (shouldEmitEvent) notifyAllSubscribers(AuthChangeEvent.tokenRefreshed);
 
       return AuthResponse(session: session);
     }
@@ -817,7 +836,7 @@ class GoTrueClient {
 
   /// return provider url only
   Future<OAuthResponse> _handleProviderSignIn(
-    Provider provider, {
+    OAuthProvider provider, {
     required String? scopes,
     required String? redirectTo,
     required Map<String, String>? queryParams,
@@ -913,9 +932,12 @@ class GoTrueClient {
 
   /// Generates a new JWT.
   ///
-  /// To prevent multiple simultaneous requests it catches an already ongoing requests by using the global [_refreshTokenCompleter]. If that's not null and not completed it returns the future that the ongoing request.
+  /// To prevent multiple simultaneous requests it catches an already ongoing request by using the global [_refreshTokenCompleter].
+  /// If that's not null and not completed it returns the future of the ongoing request.
   ///
-  /// To be able to call [_callRefreshToken] again after a [SocketException] and not get trapped by the ongoing request, [ignorePendingRequest] is used to bypass that check.
+  /// To call [_callRefreshToken] during a running request [ignorePendingRequest] is used to bypass that check.
+  ///
+  /// When a [ClientException] occurs [_setTokenRefreshTimer] is used to schedule a retry in the background, which emits the result via [onAuthStateChange].
   Future<AuthResponse> _callRefreshToken({
     String? refreshToken,
     String? accessToken,
@@ -923,6 +945,11 @@ class GoTrueClient {
   }) async {
     if (_refreshTokenCompleter?.isCompleted ?? true) {
       _refreshTokenCompleter = Completer<AuthResponse>();
+      // Catch any error in case nobody awaits the future
+      _refreshTokenCompleter!.future.then(
+        (value) => null,
+        onError: (error, stack) => null,
+      );
     } else if (!ignorePendingRequest) {
       return _refreshTokenCompleter!.future;
     }
@@ -951,35 +978,47 @@ class GoTrueClient {
       }
 
       _saveSession(authResponse.session!);
+      if (!_refreshTokenCompleter!.isCompleted) {
+        _refreshTokenCompleter!.complete(authResponse);
+      }
 
-      _notifyAllSubscribers(AuthChangeEvent.tokenRefreshed);
-      _refreshTokenCompleter!.complete(authResponse);
+      notifyAllSubscribers(AuthChangeEvent.tokenRefreshed);
       return authResponse;
-    } on SocketException {
+    } on ClientException catch (e, stack) {
       _setTokenRefreshTimer(
         Constants.retryInterval * pow(2, _refreshTokenRetryCount),
         refreshToken: token,
         accessToken: accessToken,
       );
-      return _refreshTokenCompleter!.future;
+      if (!_refreshTokenCompleter!.isCompleted) {
+        _refreshTokenCompleter!.completeError(e, stack);
+      }
+      rethrow;
     } catch (error, stack) {
       if (error is AuthException) {
-        if (error.message == 'Invalid Refresh Token: Refresh Token Not Found') {
+        if (error.message.startsWith('Invalid Refresh Token:')) {
           await signOut();
         }
+      }
+      if (!_refreshTokenCompleter!.isCompleted) {
+        _refreshTokenCompleter!.completeError(error, stack);
       }
       _onAuthStateChangeController.addError(error, stack);
       rethrow;
     }
   }
 
-  void _notifyAllSubscribers(AuthChangeEvent event) {
+  /// For internal use only.
+  @internal
+  void notifyAllSubscribers(AuthChangeEvent event) {
     final state = AuthState(event, currentSession);
     _onAuthStateChangeController.add(state);
     _onAuthStateChangeControllerSync.add(state);
   }
 
-  Exception _notifyException(Exception exception, [StackTrace? stackTrace]) {
+  /// For internal use only.
+  @internal
+  Exception notifyException(Exception exception, [StackTrace? stackTrace]) {
     _onAuthStateChangeController.addError(
       exception,
       stackTrace ?? StackTrace.current,

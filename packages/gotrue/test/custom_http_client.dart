@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:http/http.dart';
-import 'package:universal_io/io.dart';
 
 import 'utils.dart';
 
@@ -72,9 +71,9 @@ class RetryTestHttpClient extends BaseClient {
 
   @override
   Future<StreamedResponse> send(BaseRequest request) async {
-    if (retryCount < 3) {
-      retryCount++;
-      throw SocketException('Retry #${retryCount + 1}');
+    retryCount++;
+    if (retryCount < 4) {
+      throw ClientException('Retry #$retryCount');
     }
     final jwt = JWT(
       {'exp': (DateTime.now().millisecondsSinceEpoch / 1000).round() + 60},

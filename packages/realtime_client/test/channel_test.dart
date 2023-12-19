@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:realtime_client/realtime_client.dart';
 import 'package:realtime_client/src/constants.dart';
+import 'package:realtime_client/src/types.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -233,6 +238,128 @@ void main() {
       channel.joinPush.trigger('ok', {});
 
       expect(socket.channels.length, 0);
+    });
+  });
+
+  group('send', () {
+    late HttpServer mockServer;
+
+    setUp(() async {
+      mockServer = await HttpServer.bind('localhost', 0);
+      socket = RealtimeClient(
+        'ws://${mockServer.address.host}:${mockServer.port}/realtime/v1',
+        params: {'apikey': 'supabaseKey'},
+      );
+
+      channel = socket.channel('myTopic');
+    });
+
+    tearDown(() async {
+      socket.disconnect();
+      await channel.unsubscribe();
+    });
+
+    test('sets endpoint', () {
+      expect(channel.broadcastEndpointURL,
+          'http://${mockServer.address.host}:${mockServer.port}/realtime/v1/api/broadcast');
+      expect(channel.subTopic, 'myTopic');
+    });
+
+    test('send message via ws conn when subscribed to channel', () async {
+      channel.subscribe((status, [error]) async {
+        if (status == RealtimeSubscribeStatus.subscribed) {
+          final completer = Completer<ChannelResponse>();
+          channel.send(
+            type: RealtimeListenTypes.broadcast,
+            payload: {
+              'myKey': 'myValue',
+            },
+          ).then(
+            (value) => completer.complete(value),
+            onError: (e) => completer.completeError(e),
+          );
+
+          await for (final HttpRequest req in mockServer) {
+            expect(req.uri.toString(), startsWith('/realtime/v1/websocket'));
+            await req.response.close();
+            break;
+          }
+          expect(await completer.future, ChannelResponse.ok);
+        }
+      });
+    });
+
+    test(
+        'send message via http request to Broadcast endpoint when not subscribed to channel',
+        () async {
+      final completer = Completer<ChannelResponse>();
+      channel.send(
+        type: RealtimeListenTypes.broadcast,
+        payload: {
+          'myKey': 'myValue',
+        },
+      ).then(
+        (value) => completer.complete(value),
+        onError: (e) => completer.completeError(e),
+      );
+
+      await for (final HttpRequest req in mockServer) {
+        expect(req.uri.toString(), '/realtime/v1/api/broadcast');
+        expect(req.headers.value('apikey'), 'supabaseKey');
+
+        final body = json.decode(await utf8.decodeStream(req));
+        final message = body['messages'][0];
+        final payload = message['payload'];
+
+        expect(payload, containsPair('myKey', 'myValue'));
+        expect(message, containsPair('topic', 'myTopic'));
+
+        await req.response.close();
+        break;
+      }
+      expect(await completer.future, ChannelResponse.ok);
+    });
+  });
+
+  group('presence', () {
+    setUp(() {
+      socket = RealtimeClient('', timeout: const Duration(milliseconds: 1234));
+      channel =
+          RealtimeChannel('topic', socket, params: RealtimeChannelConfig());
+    });
+
+    test('description', () async {
+      bool syncCalled = false, joinCalled = false, leaveCalled = false;
+      channel.onPresenceSync((payload) {
+        syncCalled = true;
+      }).onPresenceJoin((payload) {
+        joinCalled = true;
+      }).onPresenceLeave((payload) {
+        leaveCalled = true;
+      }).subscribe();
+
+      channel.trigger('presence', {'event': 'sync'}, '1');
+      expect(syncCalled, isTrue);
+      channel.trigger(
+          'presence',
+          {
+            'event': 'join',
+            'key': 'joinKey',
+            'newPresences': <Presence>[],
+            'currentPresences': <Presence>[],
+          },
+          '2');
+      expect(joinCalled, isTrue);
+      channel.trigger(
+          'presence',
+          {
+            'event': 'leave',
+            'key': 'leaveKey',
+            'leftPresences': <Presence>[],
+            'currentPresences': <Presence>[],
+          },
+          '3');
+      expect(leaveCalled, isTrue);
     });
   });
 }

@@ -2,7 +2,8 @@ import 'dart:typed_data';
 
 import 'package:storage_client/src/fetch.dart';
 import 'package:storage_client/src/types.dart';
-import 'package:universal_io/io.dart';
+
+import 'file_io.dart' if (dart.library.js) './file_stub.dart';
 
 class StorageFileApi {
   final String url;
@@ -116,8 +117,8 @@ class StorageFileApi {
         'retryAttempts has to be greater or equal to 0');
 
     final cleanPath = _removeEmptyFolders(path);
-    final _path = _getFinalPath(cleanPath);
-    var url = Uri.parse('${this.url}/object/upload/sign/$_path');
+    final finalPath = _getFinalPath(cleanPath);
+    var url = Uri.parse('${this.url}/object/upload/sign/$finalPath');
     url = url.replace(queryParameters: {'token': token});
 
     await storageFetch.putFile(
@@ -150,8 +151,8 @@ class StorageFileApi {
         'retryAttempts has to be greater or equal to 0');
 
     final cleanPath = _removeEmptyFolders(path);
-    final _path = _getFinalPath(cleanPath);
-    var url = Uri.parse('${this.url}/object/upload/sign/$_path');
+    final path0 = _getFinalPath(cleanPath);
+    var url = Uri.parse('${this.url}/object/upload/sign/$path0');
     url = url.replace(queryParameters: {'token': token});
 
     await storageFetch.putBinaryFile(
@@ -363,7 +364,9 @@ class StorageFileApi {
     );
     final List<SignedUrl> urls = (response as List).map((e) {
       return SignedUrl(
-        path: e['path'],
+        // Prevents exceptions being thrown when null value is returned
+        // https://github.com/supabase/storage-api/issues/353
+        path: e['path'] ?? '',
         signedUrl: '$url${e['signedURL']}',
       );
     }).toList();
