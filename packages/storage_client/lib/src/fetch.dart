@@ -11,7 +11,7 @@ import 'package:storage_client/src/types.dart';
 
 import 'file_io.dart' if (dart.library.js) './file_stub.dart';
 
-Fetch storageFetch = Fetch();
+//Fetch storageFetch = Fetch();
 
 class Fetch {
   final Client? httpClient;

@@ -10,13 +10,10 @@ class StorageFileApi {
   final Map<String, String> headers;
   final String? bucketId;
   final int _retryAttempts;
+  late final Fetch storageFetch;
 
-  const StorageFileApi(
-    this.url,
-    this.headers,
-    this.bucketId,
-    this._retryAttempts,
-  );
+  StorageFileApi(this.url, this.headers, this.bucketId, this._retryAttempts,
+      {required this.storageFetch});
 
   String _getFinalPath(String path) {
     return '$bucketId/$path';
