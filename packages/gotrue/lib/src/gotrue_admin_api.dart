@@ -124,6 +124,7 @@ class GoTrueAdminApi {
   Future<GenerateLinkResponse> generateLink({
     required GenerateLinkType type,
     required String email,
+    String? newEmail,
     String? password,
     Map<String, dynamic>? data,
     String? redirectTo,
@@ -131,6 +132,7 @@ class GoTrueAdminApi {
     final body = {
       'email': email,
       'type': type.snakeCase,
+      if (newEmail != null) 'new_email': newEmail,
       if (data != null) 'data': data,
       if (redirectTo != null) 'redirect_to': redirectTo,
       if (password != null) 'password': password,
